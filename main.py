@@ -1,14 +1,6 @@
 from mpi4py import MPI  
 import time, random
 
-# Stałe
-comm = MPI.COMM_WORLD                                                                                                                                                                            
-pid = comm.Get_rank()  # ID procesu np. 3
-N = comm.Get_size()    # liczba procesów
-
-W = N - 1 # Pojemnosc windy
-T = 2 # Pojemnosc tarasu
-
 REQ_TARAS = 1
 ACK_TARAS = 2
 REQ_WINDA_DOL = 3
@@ -19,241 +11,363 @@ ACK_WINDA_GORA = 7
 REL_WINDA_GORA = 8
 REL_TARAS = 9
 
+# Stałe
+comm = MPI.COMM_WORLD
+N = comm.Get_size()    # liczba procesów
+W = 3 # Pojemnosc windy
+T = N - 1 # Pojemnosc tarasu
+
 # Funkcje pomocnicze
 def wait():
     time.sleep(random.uniform(1, 5))  # czeka 1-5 sekund
 
-# Wysyłam wiadomość do wszystkich
-def send_to_all(msg, tag):
-  for dest in range(N):
-      if dest != pid:                                                                                                                                                                               
-          comm.send(msg, dest=dest, tag=tag)
+class Process:
+    # Zmienne procesu
+    pid = -1
+    stan = "NA_DOLE" # (NA_DOLE, CZEKA_NA_WINDE_DOL, CZEKA_NA_WINDE_GORA, NA_TARASIE)
+    clock = 0
+
+    # Kolejki:
+    kolejka_taras = []
+    kolejka_winda_dol = []
+    kolejka_winda_gora = []
+    kolejka_request = []
+
+    # Liczniki
+    ack_taras = 0
+    ack_winda_gora = 0
+    ack_winda_dol = 0
+
+    # Czas pobudki
+    wakeup_time = 0
+    is_sleeping = False
+
+    def __init__(self, pid):
+        self.pid = pid
+
+    # Wyslanie wiadomosci do pozostalych procesow
+    def send_to_all(self, msg, tag):
+        for dest in range(N):
+            if dest != self.pid:
+                comm.send(msg, dest=dest, tag=tag)
+
+    # Dodanie samego siebie do kolejki
+    def add_self_to_queue(self, queue, message="KOLEJKA:"):
+        queue.append({'pid': self.pid, 'timestamp': self.clock})
+        queue.sort(key=lambda x: (x['timestamp'], x['pid']))
+        print(f'{self.pid} >> {message} {queue}')
+
+    # Dodanie calej wiadomosci do kolejki
+    def add_to_queue(self, queue, msg, message="KOLEJKA:"):
+        queue.append(msg)
+        queue.sort(key=lambda x: (x['timestamp'], x['pid']))
+        print(f'{self.pid} >> {message} {queue}')
+
+    def get_index_by_pid(self, queue, pid):
+        for i in range(len(queue)):
+            if queue[i]['pid'] == pid:
+                return i
+        return -1
+
+    def sleep(self):
+        self.wakeup_time = time.time() + random.uniform(2, 5)
+        self.is_sleeping = True
+
+    def NA_DOLE_wakeup(self):
+        self.ack_taras = 0
+        self.clock += 1
+        self.send_to_all({"pid": self.pid, "timestamp": self.clock}, REQ_TARAS)
+        self.add_self_to_queue(queue=self.kolejka_taras, message="KOLEJKA TARAS:")
+        print(f"{self.pid} >> Wysyłam wszystkim REQ_TARAS")
+
+    def NA_TARASIE_wakeup(self):
+        self.ack_winda_gora = 0
+        self.clock += 1
+        self.stan = "CZEKA_NA_WINDE_GORA"
+        self.send_to_all({"pid": self.pid, "timestamp": self.clock}, REQ_WINDA_GORA)
+        self.add_self_to_queue(queue=self.kolejka_winda_gora, message="KOLEJKA WINDA DOL:")
 
 
 
-clock = 0
-stan = "NA_DOLE" # (NA_DOLE, CZEKA_NA_WINDE_DOL, CZEKA_NA_WINDE_GORA, NA_TARASIE)
+if __name__ == '__main__':
+    p = Process(pid=comm.Get_rank())  # Obiekt procesu
+    if p.pid == 0:
+        p.NA_DOLE_wakeup()
+    else:
+        p.sleep()
+        print(f'{p.pid} >> Czeka')
 
-# Kolejki:
-kolejka_taras = []
-kolejka_winda_dol = []
-kolejka_winda_gora = []
-kolejka_request = []
 
-# Liczniki
-ack_taras = 0
-ack_winda_gora = 0
-ack_winda_dol = 0
+    # Odbieranie wiadomosci w petli
+    while True:
+        # Sprawdzenie czy jest wiadomosc do odebrania
+        status = MPI.Status()
+        ready = comm.Iprobe(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG, status=status)
 
-# Wysyłam REQ_TARAS do wszystkich
-wait()
-ack_taras = 0
-clock += 1 # Zwiekszam zegar lamporta
-send_to_all({"pid": pid, "timestamp": clock}, REQ_TARAS)
-stan = "CZEKA_NA_TARAS"
+        if not ready:
+            # Sprawdzenie czy proces sie 'wybudzil'
+            if time.time() >= p.wakeup_time and p.is_sleeping:
+                if p.stan == "NA_DOLE":
+                    p.NA_DOLE_wakeup()
+                    p.is_sleeping = False
+                elif p.stan == "NA_TARASIE":
+                    p.NA_TARASIE_wakeup()
+                    p.is_sleeping = False
 
-clock_req_taras = clock
-kolejka_taras.append({"pid": pid, "timestamp": clock_req_taras})
-kolejka_taras.sort(key=lambda x: (x['timestamp'], x['pid']))
+            time.sleep(0.1)
+            continue
 
-print(f"{pid}: wysyłam wszystkim REQ_TARAS")
+        sender, tag = status.Get_source(), status.Get_tag()
+        msg = comm.recv(source=sender, tag=tag)
 
-while True: 
-    # Dostaje wiadomość 
-    status = MPI.Status()
-    msg = comm.recv(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG, status=status)
-    tag = status.Get_tag()
-    nadawca = status.Get_source()
+        '''
+        status = MPI.Status()
+        msg = comm.recv(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG, status=status)
+        tag = status.Get_tag()
+        sender = status.Get_source()
+        '''
 
-    # Aktualizuje swoj zegar lamporta
-    clock = max(clock, msg['timestamp']) + 1
+        # Lokalna synchronizacja zegara
+        p.clock = max(p.clock, msg['timestamp']) + 1
 
-    # Sprawdzam co to za wiadomość i reaguje
-    if tag == 1:
-        # Dostaje żądanie REQ_TARAS
-        print(f"{pid}: dostaje REQ_TARAS od {nadawca}")
 
-        # Dodaje zadanie nadawcy do kolejka_taras (timestamp i pid)
-        kolejka_taras.append(msg)
-        kolejka_taras.sort(key=lambda x: (x['timestamp'], x['pid']))
-        print(f"KOLEJKA NA TARAS: {kolejka_taras}")
+        # Sprawdzenie otrzymanej wiadomosci
+        if tag == REQ_TARAS:
+            print(f"{p.pid} >> Dostalem REQ_TARAS od {sender}")
+            index = p.get_index_by_pid(p.kolejka_taras, p.pid)
+            # if (p.stan != "NA_DOLE" or
+            #     p.ack_taras == N - 1 or
+            #     #(p.stan == "NA_DOLE" and index == -1) or
+            #     (index != -1 and msg['timestamp'] <= p.kolejka_taras[index]['timestamp'])):
+            #     # Dodanie wiadomosci do kolejka_taras
+            #     p.add_to_queue(p.kolejka_taras, msg, "KOLEJKA NA TARAS:")
+            #
+            #     p.clock += 1
+            #     comm.send({"pid": p.pid, "timestamp": p.clock}, dest=sender, tag=ACK_TARAS)
+            # else:
+            #     # Dodanie wiadomosci do kolejka_request
+            #     p.add_to_queue(p.kolejka_request, msg, "KOLEJKA REQUEST:")
+            if p.stan != "NA_DOLE" or p.ack_taras == N - 1:
+                # Dodanie wiadomosci do kolejka_taras
+                p.add_to_queue(p.kolejka_taras, msg, "KOLEJKA NA TARAS:")
 
-        # odsyłam dokłądnie temu wątkowi ACK_TARAS
-        clock += 1
-        comm.send({"pid": pid, "timestamp": clock}, dest=nadawca, tag=ACK_TARAS)
+                p.clock += 1
+                comm.send({"pid": p.pid, "timestamp": p.clock}, dest=sender, tag=ACK_TARAS)
+            else:
+                if index != -1 and msg['timestamp'] > p.kolejka_taras[index]['timestamp']:
+                    # Dodanie wiadomosci do kolejka_request
+                    p.add_to_queue(p.kolejka_request, msg, "KOLEJKA REQUEST:")
+                else:
+                    # Dodanie wiadomosci do kolejka_taras
+                    p.add_to_queue(p.kolejka_taras, msg, "KOLEJKA NA TARAS:")
 
-    elif tag == 2:
-        # Dostaje ACK_TARAS
-        print(f"{pid}: dostaje ACK_TARAS od {nadawca}")
+                    p.clock += 1
+                    comm.send({"pid": p.pid, "timestamp": p.clock}, dest=sender, tag=ACK_TARAS)
 
-        ack_taras += 1 # Zwiekszam o 1
 
-        pozycja_w_kolejka_taras = kolejka_taras.index({"pid": pid, "timestamp": clock_req_taras}) + 1
-        print(f"{pid}: moja pozycja w kolejce na taras to {pozycja_w_kolejka_taras}")
+        elif tag == ACK_TARAS:
+            print(f"{p.pid} >> Dostalem ACK_TARAS od {sender}")
 
-        # Sprawdzam czy mam juz n-1 acków
-        if ack_taras == N-1 and pozycja_w_kolejka_taras <= min(T-(T%W), N-(N%W)):
-            print(f"{pid}: mam juz N-1 ack! ")
+            if p.stan == "NA_DOLE":
+                p.ack_taras += 1
 
-            ack_winda_dol = 0
+                if p.ack_taras == N - 1:
+                    # Odeslanie zaleglych ACK wszystkim z kolejka_request
+                    while p.kolejka_request:
+                        msg = p.kolejka_request.pop(0)
+                        p.clock += 1
+                        comm.send({"pid": p.pid, "timestamp": p.clock}, dest=msg['pid'], tag=ACK_TARAS)
 
-            # Wysyłam REQ_WINDA_DOL
-            clock += 1
-            clock_req_winda_dol = clock
-            send_to_all({"pid": pid, "timestamp": clock}, REQ_WINDA_DOL)
+                # Pozycja w kolejce taras
+                pos_in_kolejka_taras = p.get_index_by_pid(p.kolejka_taras, p.pid) + 1
+                print(f"{p.pid} >> Pozycja w kolejce na taras to {pos_in_kolejka_taras}")
 
-            # Ustawiam swoj stan na CZEKA_NA_WINDE_DOL
-            stan = "CZEKA_NA_WINDE_DOL"
+                # Sprawdzenie warunkow
+                if p.ack_taras == N - 1 and pos_in_kolejka_taras <= min(T - (T % W), N - (N % W)):
+                    print(f"{p.pid} >> Zmieniam stan na CZEKA_NA_WINDE_DOL! ")
 
-            # Dodaje siebie do kolejka_winda_dol???
-            kolejka_winda_dol.append({"pid": pid, "timestamp": clock})
-            kolejka_winda_dol.sort(key=lambda x: (x['timestamp'], x['pid']))
+                    p.ack_winda_dol = 0
+                    p.ack_taras = 0
 
-    elif tag == 3:
-        # Dostaje REQ_WINDA_DOL
-        print(f"{pid}: dostaje REQ_WINDA_DOL od {nadawca}")
+                    # Zmiana stanu na CZEKA_NA_WINDE_DOL
+                    p.stan = "CZEKA_NA_WINDE_DOL"
 
-        # Dodaje zadanie nadawcy do kolejka_taras (timestamp i pid)
-        kolejka_winda_dol.append(msg)
-        kolejka_winda_dol.sort(key=lambda x: (x['timestamp'], x['pid']))
-        print(f"KOLEJKA WINDA DOL: {kolejka_winda_dol}")
+                    # Wysyłanie REQ_WINDA_DOL
+                    p.clock += 1
+                    p.send_to_all({"pid": p.pid, "timestamp": p.clock}, REQ_WINDA_DOL)
 
-        # odsyłam dokłądnie temu wątkowi ACK_TARAS
-        clock += 1
-        comm.send({"pid": pid, "timestamp": clock}, dest=nadawca, tag=ACK_WINDA_DOL)
+                    # Dodaje siebie do kolejka_winda_dol???
+                    p.add_self_to_queue(p.kolejka_winda_dol, "KOLEJKA WINDA DOL:")
 
-    elif tag == 4:
-        # Dostaje ACK_WINDA_DOL
-        print(f"{pid}: dostaje ACK_WINDA_DOL od {nadawca}")
 
-        ack_winda_dol += 1 # Zwiekszam o 1
+        elif tag == REQ_WINDA_DOL:
+            print(f"{p.pid} >> Dostalem REQ_WINDA_DOL od {sender}")
 
-        pozycja_w_kolejka_winda_dol = kolejka_winda_dol.index({"pid": pid, "timestamp": clock_req_winda_dol}) + 1
-        print(f"{pid}: moja pozycja w kolejce na taras to {pozycja_w_kolejka_winda_dol}")
+            index = p.get_index_by_pid(p.kolejka_winda_dol, p.pid)
+            if (p.stan != "CZEKA_NA_WINDE_DOL" or
+                    p.ack_winda_dol == N - 1 or
+                    (index != -1 and msg['timestamp'] <= p.kolejka_winda_dol[index]['timestamp'])):
+                # Dodanie wiadomosci do kolejka_winda_dol
+                p.add_to_queue(p.kolejka_winda_dol, msg, "KOLEJKA WINDA DOL:")
 
-        # Sprawdzam czy pierwszy proces w kolejce queue_winda_dol posiada większy priorytet niz pierwszy proces w kolejce queue_winda_gora.
-        priorytet_winda_dol = kolejka_winda_dol[0]['timestamp']
+                p.clock += 1
+                comm.send({"pid": p.pid, "timestamp": p.clock}, dest=sender, tag=ACK_WINDA_DOL)
+            else:
+                # Dodanie wiadomosci do kolejka_request
+                p.add_to_queue(p.kolejka_request, msg, "KOLEJKA REQUEST:")
 
-        if len(kolejka_winda_gora) > 0:
-            priorytet_winda_gora = kolejka_winda_gora[0]['timestamp']
-        else:
-            priorytet_winda_gora = float('inf')
+        elif tag == ACK_WINDA_DOL:
+            print(f"{p.pid} >> Dostalem ACK_WINDA_DOL od {sender}")
 
-        # Sprawdzam czy mam juz n-1 acków
-        if ack_winda_dol == N-1 and pozycja_w_kolejka_winda_dol <= W and priorytet_winda_dol < priorytet_winda_gora:
-            print(f"{pid}: mam juz N-1 ack! Wysylam REL_WINDA_DOL!")
+            if p.stan == "CZEKA_NA_WINDE_DOL":
+                p.ack_winda_dol += 1  # Zwiekszam o 1
 
-            # Pobieram liste pierwszych W procesów z kolejka_winda_dol
-            pidy_do_windy = list()
-            i = 0
-            while i < W:
-                pidy_do_windy.append(kolejka_winda_dol[i]['pid'])
-                i += 1
+                if p.ack_winda_dol == N - 1:
+                    while p.kolejka_request:
+                        msg = p.kolejka_request.pop(0)
+                        p.clock += 1
+                        comm.send({"pid": p.pid, "timestamp": p.clock}, dest=msg['pid'], tag=ACK_WINDA_DOL)
 
-            # Wysyłam REL_WINDA_DOL
-            clock += 1
-            clock_rel_winda_dol = clock
-            send_to_all({"pid": pidy_do_windy, "timestamp": clock}, REL_WINDA_DOL)
 
-    elif tag == 5:
-        # Dostałem REL_WINDA_DOL
-        pidy_w_windzie = msg['pid']
-        kolejka_winda_dol = [x for x in kolejka_winda_dol if x['pid'] not in pidy_w_windzie]
+                pos_in_kolejka_winda_dol = p.get_index_by_pid(p.kolejka_winda_dol, p.pid) + 1
+                print(f"{p.pid} >> Pozycja w kolejka_winda_dol {pos_in_kolejka_winda_dol}")
 
-        if pid in pidy_w_windzie:
-            # Mój pid znajduje się w windzie
-            stan = "NA_TARASIE"
+                # Sprawdzenie warunku przejscia CZEKA_NA_WINDE_DOL -> NA_TARASIE
+                if p.ack_winda_dol == N - 1 and pos_in_kolejka_winda_dol == W:
+                    # Sprawdzam czy pierwszy proces w kolejce queue_winda_dol posiada większy priorytet niz pierwszy proces w kolejce queue_winda_gora.
+                    ts_winda_dol = p.kolejka_winda_dol[0]['timestamp']
+                    ts_winda_gora = float('inf')
 
-            wait()
+                    if len(p.kolejka_winda_gora) > 0:
+                        ts_winda_gora = p.kolejka_winda_gora[0]['timestamp']
 
-            ack_winda_gora = 0
+                    if ts_winda_dol < ts_winda_gora:
+                        # Pobieram liste pierwszych W procesów z kolejka_winda_dol
+                        pidy_do_windy = list()
+                        i = 0
+                        while i < W:
+                            pidy_do_windy.append(p.kolejka_winda_dol[i]['pid'])
+                            i += 1
 
-            # Wysyłam REQ_WINDA_GORA
-            clock += 1
-            clock_req_winda_gora = clock
-            send_to_all({"pid": pid, "timestamp": clock}, REQ_WINDA_GORA)
+                        print(f"{p.pid} >> Jestem W-tym procesem w kolejka_winda_dol. Wysylam grupowe REL_WINDA_DOL! {pidy_do_windy}")
 
-            # Ustawiam swoj stan na CZEKA_NA_WINDE_GORA
-            stan = "CZEKA_NA_WINDE_GORA"
+                        # Wysyłam REL_WINDA_DOL
+                        p.clock += 1
+                        p.send_to_all({"pid": pidy_do_windy, "timestamp": p.clock}, REL_WINDA_DOL)
 
-            # Dodaje siebie do kolejka_winda_gora???
-            kolejka_winda_gora.append({"pid": pid, "timestamp": clock})
-            kolejka_winda_gora.sort(key=lambda x: (x['timestamp'], x['pid']))
+                        # Obsluga W-tego procesu
+                        p.kolejka_winda_dol = [x for x in p.kolejka_winda_dol if x['pid'] not in pidy_do_windy]
+                        p.stan = "NA_TARASIE"
+                        p.sleep()
+                        print(f'{p.pid} >> Czeka')
 
-    elif tag == 6:
-        # Dostaje REQ_WINDA_GORA
-        print(f"{pid}: dostaje REQ_WINDA_GORA od {nadawca}")
 
-        kolejka_winda_gora.append(msg)
-        kolejka_winda_gora.sort(key=lambda x: (x['timestamp'], x['pid']))
-        print(f"KOLEJKA WINDA GORA: {kolejka_winda_gora}")
+        elif tag == REL_WINDA_DOL:
+            print(f"{p.pid} >> Dostalem REL_WINDA_DOL od {sender}")
 
-        clock += 1
-        comm.send({"pid": pid, "timestamp": clock}, dest=nadawca, tag=ACK_WINDA_GORA)
+            pidy_w_windzie = msg['pid']
+            p.kolejka_winda_dol = [x for x in p.kolejka_winda_dol if x['pid'] not in pidy_w_windzie]
 
-    elif tag == 7:
-        # Dostaje ACK_WINDA_GORA
-        print(f"{pid}: dostaje ACK_WINDA_GORA od {nadawca}")
+            if p.pid in pidy_w_windzie:
+                # Pid procesu znajduje się w windzie
+                p.stan = "NA_TARASIE"
+                p.ack_winda_dol = 0
 
-        ack_winda_gora += 1 # Zwiekszam o 1
+                p.sleep()
+                print(f'{p.pid} >> Czeka')
 
-        pozycja_w_kolejka_winda_gora = kolejka_winda_gora.index({"pid": pid, "timestamp": clock_req_winda_gora}) + 1
-        print(f"{pid}: moja pozycja w kolejce na taras to {pozycja_w_kolejka_winda_gora}")
 
-        # Sprawdzam czy pierwszy proces w kolejce queue_winda_gora posiada większy priorytet niz pierwszy proces w kolejce queue_winda_gora.
-        priorytet_winda_gora = kolejka_winda_gora[0]['timestamp']
+        elif tag == REQ_WINDA_GORA:
+            print(f"{p.pid} >> Dostalem REQ_WINDA_GORA od {sender}")
 
-        if len(kolejka_winda_dol) > 0:
-            priorytet_winda_dol = kolejka_winda_dol[0]['timestamp']
-        else:
-            priorytet_winda_dol = float('inf')
+            index = p.get_index_by_pid(p.kolejka_winda_gora, p.pid)
+            if (p.stan != "CZEKA_NA_WINDE_GORA" or
+                    p.ack_winda_gora == N - 1 or
+                    (index != -1 and msg['timestamp'] <= p.kolejka_winda_gora[index]['timestamp'])):
+                # Dodanie wiadomosci do kolejka_winda_gora
+                p.add_to_queue(p.kolejka_winda_gora, msg, "KOLEJKA WINDA GORA:")
 
-        # Sprawdzam czy mam juz n-1 acków
-        if ack_winda_gora == N-1 and pozycja_w_kolejka_winda_gora <= W and priorytet_winda_gora < priorytet_winda_dol:
-            print(f"{pid}: mam juz N-1 ack! Wysylam REL_WINDA_GORA!")
+                p.clock += 1
+                comm.send({"pid": p.pid, "timestamp": p.clock}, dest=sender, tag=ACK_WINDA_GORA)
+            else:
+                # Dodanie wiadomosci do kolejka_request
+                p.add_to_queue(p.kolejka_request, msg, "KOLEJKA REQUEST:")
 
-            # Pobieram liste pierwszych W procesów z kolejka_winda_dol
-            pidy_do_windy = list()
-            i = 0
-            while i < W:
-                pidy_do_windy.append(kolejka_winda_gora[i]['pid'])
-                i += 1
+        elif tag == ACK_WINDA_GORA:
+            print(f"{p.pid} >> Dostalem ACK_WINDA_GORA od {sender}")
 
-            # Wysyłam REL_WINDA_GORA
-            clock += 1
-            clock_rel_winda_gora = clock
-            send_to_all({"pid": pidy_do_windy, "timestamp": clock}, REL_WINDA_GORA)
+            if p.stan == "CZEKA_NA_WINDE_GORA":
+                p.ack_winda_gora += 1  # Zwiekszam o 1
 
-    elif tag == 8:
-        # Dostałem REL_WINDA_GORA
-        pidy_w_windzie = msg['pid']
-        kolejka_winda_gora = [x for x in kolejka_winda_gora if x['pid'] not in pidy_w_windzie]
+                if p.ack_winda_gora == N - 1:
+                    while p.kolejka_request:
+                        msg = p.kolejka_request.pop(0)
+                        p.clock += 1
+                        comm.send({"pid": p.pid, "timestamp": p.clock}, dest=msg['pid'], tag=ACK_WINDA_GORA)
 
-        if pid in pidy_w_windzie:
-            # Mój pid znajduje się w windzie
-            stan = "NA_DOLE"
+                pos_in_kolejka_winda_gora = p.get_index_by_pid(p.kolejka_winda_gora, p.pid) + 1
+                print(f"{p.pid} >> Pozycja w kolejka_winda_gora {pos_in_kolejka_winda_gora}")
 
-            wait()
+                # Sprawdzenie warunku przejscia CZEKA_NA_WINDE_DOL -> NA_TARASIE
+                if p.ack_winda_gora == N - 1 and pos_in_kolejka_winda_gora == W:
+                    # Sprawdzam czy pierwszy proces w kolejce queue_winda_dol posiada większy priorytet niz pierwszy proces w kolejce queue_winda_gora.
+                    ts_winda_gora = p.kolejka_winda_gora[0]['timestamp']
+                    ts_winda_dol = float('inf')
 
-            # Wysyłam REL_TARAS
-            clock += 1
-            clock_rel_taras = clock
-            send_to_all({"pid": pid, "timestamp": clock}, REL_TARAS)
+                    if len(p.kolejka_winda_dol) > 0:
+                        ts_winda_dol = p.kolejka_winda_dol[0]['timestamp']
 
-            # Powrót do początku cyklu (punkt 2)
-            wait()
-            ack_taras = 0
-            clock += 1
-            clock_req_taras = clock
-            send_to_all({"pid": pid, "timestamp": clock}, REQ_TARAS)
-            stan = "CZEKA_NA_TARAS"
-            kolejka_taras.append({"pid": pid, "timestamp": clock_req_taras})
-            kolejka_taras.sort(key=lambda x: (x['timestamp'], x['pid']))
-            print(f"{pid}: wysyłam wszystkim REQ_TARAS")
+                    print(f'{p.pid} >> KOLEJKA WINDA DOL: {p.kolejka_winda_dol}')
 
-    elif tag == 9:
-        # Dostaje REL_TARAS
-        print(f"{pid}: dostaje REL_TARAS od {nadawca}")
+                    if ts_winda_gora < ts_winda_dol:
+                        # Pobieram liste pierwszych W procesów z kolejka_winda_gora
+                        pidy_do_windy = list()
+                        i = 0
+                        while i < W:
+                            pidy_do_windy.append(p.kolejka_winda_gora[i]['pid'])
+                            i += 1
 
-        kolejka_taras = [x for x in kolejka_taras if x['pid'] != msg['pid']]
-        print(f"KOLEJKA NA TARAS: {kolejka_taras}")
+                        print(
+                            f"{p.pid} >> Jestem W-tym procesem w kolejka_winda_gora. Wysylam grupowe REL_WINDA_GORA! {pidy_do_windy}")
+
+                        # Wysyłam REL_WINDA_GORA
+                        p.clock += 1
+                        p.send_to_all({"pid": pidy_do_windy, "timestamp": p.clock}, REL_WINDA_GORA)
+
+                        # Obsluga W-tego procesu
+                        p.kolejka_winda_gora = [x for x in p.kolejka_winda_gora if x['pid'] not in pidy_do_windy]
+                        p.stan = "NA_DOLE"
+                        p.clock += 1
+                        p.send_to_all({"pid": pidy_do_windy, "timestamp": p.clock}, REL_TARAS)
+                        p.kolejka_taras = [x for x in p.kolejka_taras if x['pid'] not in pidy_do_windy]
+                        print(f"{p.pid} >> KOLEJKA NA TARAS: {p.kolejka_taras}")
+                        p.sleep()
+                        print(f'{p.pid} >> Czeka')
+
+        elif tag == REL_WINDA_GORA:
+            print(f"{p.pid} >> Dostalem REL_WINDA_GORA od {sender}")
+
+            # Dostałem REL_WINDA_GORA
+            pidy_w_windzie = msg['pid']
+            p.kolejka_winda_gora = [x for x in p.kolejka_winda_gora if x['pid'] not in pidy_w_windzie]
+
+            if p.pid in pidy_w_windzie:
+                # Mój pid znajduje się w windzie
+                p.stan = "NA_DOLE"
+
+                # wait()
+
+                # Wysyłanie REL_TARAS
+                # p.clock += 1
+                # p.send_to_all({"pid": p.pid, "timestamp": p.clock}, REL_TARAS)
+                # p.kolejka_taras = [x for x in p.kolejka_taras if x['pid'] != p.pid]
+
+                # Powrót do początku cyklu (punkt 2)
+                p.sleep()
+
+        elif tag == REL_TARAS:
+            print(f"{p.pid} >> Dostalem REL_TARAS od {sender}")
+
+            pidy = msg['pid']
+            p.kolejka_taras = [x for x in p.kolejka_taras if x['pid'] not in pidy]
+            print(f"{p.pid} >> KOLEJKA NA TARAS: {p.kolejka_taras}")

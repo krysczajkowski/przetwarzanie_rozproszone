@@ -290,12 +290,12 @@ if __name__ == '__main__':
                 p.sleep()
                 print(f'{p.pid} >> Czeka')
             else:
-                p.try_enter_winda_dol()
-                p.try_enter_winda_gora()
-                # if p.stan == "CZEKA_NA_WINDE_DOL":
-                #     p.try_enter_winda_dol()
-                # elif p.stan == "CZEKA_NA_WINDE_GORA":
-                #     p.try_enter_winda_gora()
+                # p.try_enter_winda_dol()
+                # p.try_enter_winda_gora()
+                if p.stan == "CZEKA_NA_WINDE_DOL":
+                    p.try_enter_winda_dol()
+                elif p.stan == "CZEKA_NA_WINDE_GORA":
+                    p.try_enter_winda_gora()
 
 
         # Reakcja na REQ_WINDA_GORA
@@ -355,12 +355,12 @@ if __name__ == '__main__':
                 p.sleep()
                 print(f'{p.pid} >> Czeka')
             else:
-                p.try_enter_winda_dol()
-                p.try_enter_winda_gora()
-                # if p.stan == "CZEKA_NA_WINDE_DOL":
-                #     p.try_enter_winda_dol()
-                # elif p.stan == "CZEKA_NA_WINDE_GORA":
-                #     p.try_enter_winda_gora()
+                # p.try_enter_winda_dol()
+                # p.try_enter_winda_gora()
+                if p.stan == "CZEKA_NA_WINDE_DOL":
+                    p.try_enter_winda_dol()
+                elif p.stan == "CZEKA_NA_WINDE_GORA":
+                    p.try_enter_winda_gora()
 
 
         # Reakcja na REL_TARAS
